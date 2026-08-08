@@ -150,7 +150,15 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
 {
     DrawRadarCircles(backbuffer);
     DrawHeadingMarkings(backbuffer);
-
+    static boolean alternate = false;
+    static unsigned long lastAlternateToggle = 0;
+    unsigned long now = millis();
+    
+    if (now - lastAlternateToggle >= 5000) {
+        alternate = !alternate;
+        lastAlternateToggle = now;
+    }
+    
     // trackedAircraft can be mutated concurrently by the background fetch
     // task (see FetchCycle()), so hold the mutex for the duration of the
     // iteration/draw - it's brief (a handful of aircraft, no I/O).
@@ -163,7 +171,7 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
             auto [x, y] = ProjectCoordinateToScreen(predLat, predLon);
 
             if (displayInfoText)
-                DrawAircraftInfo(backbuffer, x, y, tracked);
+                DrawAircraftInfo(backbuffer, x, y, tracked, alternate);
 
             if (displayTriangles)
                 DrawAircraftIcon(backbuffer, x, y, tracked);
@@ -191,14 +199,14 @@ void AircraftManager::DrawHeadingMarkings(LGFX_Sprite& backbuffer) const
     backbuffer.setTextSize(1);
     backbuffer.setTextColor(lgfx::color888(0, 255, 0));
     backbuffer.setTextDatum(lgfx::middle_center);
-
+    backbuffer.setTextColor(lgfx::color888(0, 100, 0));
     for (int bearing = 0; bearing < 360; bearing += 15) {
         const bool isMajor = (bearing % 90 == 0);
         const int tickLen = isMajor ? MAJOR_TICK_LEN : MINOR_TICK_LEN;
 
         auto [x0, y0] = pointOnCircle(OUTER, bearing);
         auto [x1, y1] = pointOnCircle(OUTER - tickLen, bearing);
-        backbuffer.drawLine((int)x0, (int)y0, (int)x1, (int)y1, lgfx::color888(0, 255, 0));
+        backbuffer.drawLine((int)x0, (int)y0, (int)x1, (int)y1, lgfx::color888(0, 150, 0));
 
         if (isMajor) {
             auto [lx, ly] = pointOnCircle(OUTER - LABEL_INSET, bearing);
@@ -257,15 +265,18 @@ std::pair<int, int> AircraftManager::ProjectCoordinateToScreen(float predLat, fl
     return { x, y };
 }
 
-void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const
+void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked, bool alternate) const
 {
     const int lineHeight = tft.fontHeight() + 1;
 
     backbuffer.setTextSize(1);
     backbuffer.setTextColor(lgfx::color888(0, 255, 0));
     backbuffer.drawString(tracked.state.callsign, x + 5, y + 5);
-    backbuffer.drawString(String(tracked.state.velocity) + "m/s", x + 5, y + 5 + lineHeight);
-    backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight * 2);
+    if (alternate) {
+        backbuffer.drawString(String(tracked.state.velocity) + "m/s", x + 5, y + 5 + lineHeight);
+    } else {
+        backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight);
+    }
 }
 
 void AircraftManager::DrawAircraftIcon(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const
