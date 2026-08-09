@@ -365,6 +365,28 @@ void AircraftManager::DrawAircraftIcon(LGFX_Sprite& backbuffer, int x, int y, co
     rotated.pushImage(0, 0, PLANE_ICON_SIZE, PLANE_ICON_SIZE, planeUp, PLANE_ICON_TRANSPARENT);
     rotated.setSwapBytes(false);
 
+    // Tint icon based on speed and altitude
+    uint32_t tintColor = 0;
+    if (tracked.state.velocity == 0) {
+        tintColor = lgfx::color888(0, 0, 255);  // Blue (stationary)
+    } else if (tracked.state.baroAltitude < 300) {
+        tintColor = lgfx::color888(255, 0, 0);  // Red
+    } else if (tracked.state.baroAltitude < 1000) {
+        tintColor = lgfx::color888(255, 165, 0);  // Orange
+    }
+    
+    if (tintColor != 0) {
+        for (int yy = 0; yy < PLANE_ICON_SIZE; yy++) {
+            for (int xx = 0; xx < PLANE_ICON_SIZE; xx++) {
+                uint32_t pixel = rotated.readPixel(xx, yy);
+                // Skip transparent pixels, recolor everything else
+                if (pixel != PLANE_ICON_TRANSPARENT) {
+                    rotated.drawPixel(xx, yy, tintColor);
+                }
+            }
+        }
+    }
+
     // NOTE: transparent colour must be passed here too, otherwise the icon's
     // black square background paints over the radar rings instead of the
     // rings showing through around the plane shape.
