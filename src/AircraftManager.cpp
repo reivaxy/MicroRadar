@@ -246,6 +246,8 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
             backbuffer.setTextColor(lgfx::color888(255, 0, 0));
             backbuffer.setTextDatum(lgfx::middle_center);
             backbuffer.drawString("MAX", SCREEN_SIZE_DIV_2, 10 + 3*backbuffer.fontHeight() + 2);
+            backbuffer.setTextDatum(lgfx::top_left); // restore default anchor for the other text draws (info boxes etc.)
+
         }
         for (auto& tracked : trackedAircraft) {
             if (tracked.state.onGround) continue;
