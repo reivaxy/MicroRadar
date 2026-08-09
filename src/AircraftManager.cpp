@@ -11,8 +11,8 @@ constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
 void AircraftManager::Initialise()
 {
     // get centre point + radius
-    lat = configServer.GetStoredString("latitude").toDouble();
-    lon = configServer.GetStoredString("longitude").toDouble();
+    lat = configServer.GetStoredString("tmpLat").toDouble();
+    lon = configServer.GetStoredString("tmpLon").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
     initRad = rad; 
 
@@ -208,8 +208,8 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
     static boolean alternate = false;
     static unsigned long lastAlternateToggle = 0;
     unsigned long now = millis();
-    lat = configServer.GetStoredString("latitude").toDouble();
-    lon = configServer.GetStoredString("longitude").toDouble();
+    lat = configServer.GetStoredString("tmpLat").toDouble();
+    lon = configServer.GetStoredString("tmpLon").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
     if (rad < 0.1) rad = 0.1; // enforce minimum radius of 0.2 degrees (~22km)
     // if (newRad != rad) {
@@ -344,7 +344,7 @@ void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, co
     backbuffer.setTextColor(lgfx::color888(0, 255, 0));
     if (alternate) {
         backbuffer.drawString(tracked.state.callsign, x + 5, y + 5);
-        backbuffer.drawString(String(tracked.state.velocity) + "m/s", x + 5, y + 5 + lineHeight);
+        backbuffer.drawString(String(static_cast<int>(tracked.state.velocity * 3.6f)) + "km/h", x + 5, y + 5 + lineHeight);
     } else {
         backbuffer.drawString(tracked.state.originCountry, x + 5, y + 5);
         backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight);

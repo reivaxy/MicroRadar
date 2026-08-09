@@ -153,7 +153,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                             name="latitude"
                             type="number"
                             step="0.000001"
-                            value='%LATITUDE%'
+                            value='%TMP_LAT%'
                             class="border border-green-500 bg-gray-900 px-3 py-2 text-lg sm:text-base sm:px-1 sm:py-0 w-32">
                     </label>
 
@@ -177,7 +177,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                             name="longitude"
                             type="number"
                             step="0.000001"
-                            value='%LONGITUDE%'
+                            value='%TMP_LON%'
                             class="border border-green-500 bg-gray-900 px-3 py-2 text-lg sm:text-base sm:px-1 sm:py-0 w-32">
                     </label>
 
@@ -194,6 +194,13 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 </div>
 
                 <div id="positionResult" class="px-1 sm:px-2"></div>
+
+                <button
+                    type="button"
+                    onclick='resetLocation()'
+                    class="bg-green-500 text-black mt-4 px-4 py-3 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer self-start">
+                    Reset Location
+                </button>
             </form>
         </fieldset>
 
@@ -312,6 +319,18 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 positionDebounce.adjust(field, direction);
             }
 
+            function resetLocation() {
+                console.log('[position] Resetting location to saved values');
+                fetch('/reset-position', { method: 'POST' })
+                    .then(r => r.text())
+                    .then(html => {
+                        const resultDiv = document.getElementById('positionResult');
+                        if (resultDiv) resultDiv.innerHTML = html;
+                        // Reload the page to refresh the position values
+                        setTimeout(() => location.reload(), 500);
+                    });
+            }
+
             document.getElementById('cfg').addEventListener('submit', function(e) {
                 e.preventDefault();
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
@@ -338,14 +357,16 @@ void ConfigurationWebServer::Initialise() {
 
     // Handle visit to config web server
     server.on("/", HTTP_GET, [&](AsyncWebServerRequest* request) {
-        Serial.println("[GET] Handling request to config web server...");
+        log_i("[GET] Handling request to config web server...");
 
         // read all values up front so the processor lambda can capture by value
-        String latitude, longitude, radius, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled;
+        String latitude, longitude, tmpLat, tmpLon, radius, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled;
         if (prefsMutex == nullptr || xSemaphoreTake(prefsMutex, portMAX_DELAY) == pdTRUE) {
             prefs.begin("config", true);
             latitude = prefs.getString("latitude", "");
             longitude = prefs.getString("longitude", "");
+            tmpLat = prefs.getString("tmpLat", "");
+            tmpLon = prefs.getString("tmpLon", "");
             radius = prefs.getString("radius", "1.0");
             openskyClientId = prefs.getString("opensky-id", "");
             openskySecret = prefs.getString("opensky-secret", "");
@@ -366,10 +387,12 @@ void ConfigurationWebServer::Initialise() {
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
-            [latitude, longitude, radiusFormatted, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled]
+            [latitude, longitude, tmpLat, tmpLon, radiusFormatted, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled]
             (const String& var) -> String {
                 if (var == "LATITUDE")       return latitude;
                 if (var == "LONGITUDE")      return longitude;
+                if (var == "TMP_LAT")       return tmpLat;
+                if (var == "TMP_LON")       return tmpLon;
                 if (var == "RADIUS")         return String(radiusFormatted);
                 if (var == "OPENSKY_ID")     return openskyClientId;
                 if (var == "OPENSKY_SECRET") return openskySecret;
@@ -385,7 +408,7 @@ void ConfigurationWebServer::Initialise() {
 
     // Handle save submission to web server
     server.on("/save", HTTP_POST, [&](AsyncWebServerRequest* request) {
-        Serial.println("[POST] Handling form submission to config web server...");
+        log_i("[POST] Handling form submission to config web server...");
 
         // safe parameter retrieval helper lambda
         auto TrySaveParam = [request, this](const char* paramName) {
@@ -402,6 +425,11 @@ void ConfigurationWebServer::Initialise() {
 
             TrySaveParam("latitude");
             TrySaveParam("longitude");
+            // when saving main form, reset the temporary values to match the saved ones
+            auto* paramLat = request->getParam("latitude", true);
+            prefs.putString("tmpLat", paramLat != nullptr ? paramLat->value() : "");
+            auto* paramLon = request->getParam("longitude", true);
+            prefs.putString("tmpLon", paramLon != nullptr ? paramLon->value() : "");
             TrySaveParam("radius");
             TrySaveParam("opensky-id");
 
@@ -455,8 +483,8 @@ void ConfigurationWebServer::Initialise() {
         if (latParam != nullptr && lonParam != nullptr) {
             if (prefsMutex == nullptr || xSemaphoreTake(prefsMutex, portMAX_DELAY) == pdTRUE) {
                 prefs.begin("config", false);
-                prefs.putString("latitude", latParam->value());
-                prefs.putString("longitude", lonParam->value());
+                prefs.putString("tmpLat", latParam->value());
+                prefs.putString("tmpLon", lonParam->value());
                 prefs.end();
                 if (prefsMutex != nullptr) xSemaphoreGive(prefsMutex);
             }
@@ -465,6 +493,28 @@ void ConfigurationWebServer::Initialise() {
             request->send(400, "text/html", "Error: latitude or longitude parameter missing");
         }
         }
+    );
+
+    // Handle reset position to saved values
+    server.on("/reset-position", HTTP_POST, [&](AsyncWebServerRequest* request) {
+        log_i("[POST] Handling position reset to saved values...");
+
+        if (prefsMutex == nullptr || xSemaphoreTake(prefsMutex, portMAX_DELAY) == pdTRUE) {
+            prefs.begin("config", false);
+            String latitude = prefs.getString("latitude", "");
+            String longitude = prefs.getString("longitude", "");
+            log_i("[POST] Resetting position to saved values: latitude=%s, longitude=%s", latitude.c_str(), longitude.c_str());
+            prefs.putString("tmpLat", latitude);
+            prefs.putString("tmpLon", longitude);
+            prefs.end();
+            
+            if (prefsMutex != nullptr) xSemaphoreGive(prefsMutex);
+            request->send(200, "text/html", "Location reset to saved values!");
+        } else {
+            log_e("[POST] Error: could not access preferences for position reset");
+            request->send(400, "text/html", "Error: could not access preferences");
+        }
+    }
     );
 
     StartServer();
