@@ -3,6 +3,8 @@
 constexpr int SCREEN_SIZE = 240;
 constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
 
+#define MAX_TRACKED_AIRCRAFT 40
+
 #include <ArduinoJson.h>
 
 void AircraftManager::Initialise()
@@ -11,6 +13,7 @@ void AircraftManager::Initialise()
     lat = configServer.GetStoredString("latitude").toDouble();
     lon = configServer.GetStoredString("longitude").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
+    initRad = rad; 
 
     // configuration
     const String renderText = configServer.GetStoredString("infotext");
@@ -30,6 +33,9 @@ void AircraftManager::Initialise()
         dailyRequestBudget = AUTHED_TOKENS_PER_DAY - TOKEN_BUFFER; // authed tokens minus buffer
 
     fetchInterval = MS_PER_DAY / dailyRequestBudget;
+    if (fetchInterval < 30000) fetchInterval = 30000; // Enforce minimum 30 seconds
+    // display the fetch interval in seconds for debugging
+    log_i("[INFO] Fetch interval: %d seconds", fetchInterval / 1000);
 
     // Move the blocking OpenSky HTTP/token calls off the render thread and
     // onto a dedicated FreeRTOS task pinned to core 0 (Arduino's loop() runs
@@ -63,14 +69,20 @@ void AircraftManager::FetchLoop()
     }
 }
 
+void AircraftManager::ForcedFetchCycle() 
+{
+    lastFetch = 0;
+    FetchCycle();
+}
+
 void AircraftManager::FetchCycle()
 {
     unsigned long now = millis();
 
     // fetch cycle
     if (now - lastFetch >= fetchInterval) {
+        log_i("[INFO] Fetching aircraft data from OpenSky API...");
         lastFetch = now;
-
         // auth
         const String token = authHandler.GetValidToken(
             configServer.GetStoredString("opensky-id"),
@@ -101,14 +113,23 @@ void AircraftManager::FetchCycle()
 
         // track
         JsonDocument doc;
+        log_d("[INFO] Aircraft JSON: %s", result.response.c_str());
+        // log response size for debugging
+        log_i("[INFO] Aircraft JSON size: %d bytes", result.response.length());
+
         deserializeJson(doc, result.response);
         auto aircraft = JsonParser::ParseArray<Aircraft>(doc["states"]);
+        
+        // Clear the JsonDocument to free parsing memory since we've extracted all needed data
+        doc.clear();
+        
+        // log aircraft json data
+        
         now = millis(); // override with post-parse timestamp
 
         // Only the map merge needs the mutex - Draw() iterates trackedAircraft
         // from the render thread concurrently with this background task.
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            constexpr int MAX_TRACKED_AIRCRAFT = 30;  // Limit to prevent heap exhaustion
             constexpr int STALE_TIMEOUT_MS = 30000;   // Remove aircraft not seen for 30 seconds
             
             for (auto& ac : aircraft) {
@@ -134,8 +155,13 @@ void AircraftManager::FetchCycle()
                     ++it;
             }
 
+            // Log how many planes were displayed for debugging purposes
+            log_i("[INFO] Stored %d aircraft", trackedAircraft.size());
             xSemaphoreGive(dataMutex);
         }
+
+        // Deallocate the temporary aircraft vector immediately to prevent heap fragmentation
+        std::vector<Aircraft>().swap(aircraft);
     }
 }
 
@@ -153,7 +179,13 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
     static boolean alternate = false;
     static unsigned long lastAlternateToggle = 0;
     unsigned long now = millis();
-    
+    rad = configServer.GetStoredString("radius").toDouble();
+    // if (newRad != rad) {
+    //     rad = newRad;
+    //     ForcedFetchCycle(); // force a fetch cycle to update the aircraft positions based on the new radius
+    //     return;
+    // }
+
     if (now - lastAlternateToggle >= 5000) {
         alternate = !alternate;
         lastAlternateToggle = now;
@@ -163,6 +195,13 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
     // task (see FetchCycle()), so hold the mutex for the duration of the
     // iteration/draw - it's brief (a handful of aircraft, no I/O).
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        // If max tracked aircraft is reached, display a red "MAX" indicator just underneath the range label at the top of the screen
+        if (trackedAircraft.size() >= MAX_TRACKED_AIRCRAFT) {
+            backbuffer.setTextSize(1);
+            backbuffer.setTextColor(lgfx::color888(255, 0, 0));
+            backbuffer.setTextDatum(lgfx::middle_center);
+            backbuffer.drawString("MAX", SCREEN_SIZE_DIV_2, 10 + 3*backbuffer.fontHeight() + 2);
+        }
         for (auto& [icao, tracked] : trackedAircraft) {
             if (tracked.state.onGround) continue;
 
@@ -271,10 +310,11 @@ void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, co
 
     backbuffer.setTextSize(1);
     backbuffer.setTextColor(lgfx::color888(0, 255, 0));
-    backbuffer.drawString(tracked.state.callsign, x + 5, y + 5);
     if (alternate) {
+        backbuffer.drawString(tracked.state.callsign, x + 5, y + 5);
         backbuffer.drawString(String(tracked.state.velocity) + "m/s", x + 5, y + 5 + lineHeight);
     } else {
+        backbuffer.drawString(tracked.state.originCountry, x + 5, y + 5);
         backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight);
     }
 }

@@ -17,6 +17,7 @@ private:
     double lat = 0.0;
     double lon = 0.0;
     double rad = 0.2;
+    double initRad = rad;
     std::map<String, TrackedAircraft> trackedAircraft;
 
     bool displayInfoText = true;
@@ -40,20 +41,21 @@ private:
     static void FetchTaskTrampoline(void* param);
     void FetchLoop();  // runs forever on the background task
     void FetchCycle(); // one fetch-and-merge pass (the old Update() body)
-
+    
     void DrawRadarCircles(LGFX_Sprite& backbuffer) const;
     void DrawHeadingMarkings(LGFX_Sprite& backbuffer) const;
     std::pair<int, int> ProjectCoordinateToScreen(float predLat, float predLon) const;
     void DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked, bool alternate) const;
     void DrawAircraftIcon(LGFX_Sprite& backbuffer, int x, int y, const TrackedAircraft& tracked) const;
-
-public:
+    
+    public:
     AircraftManager(ConfigurationWebServer& config, OpenSkyAuthTokenHandler& auth, HttpRequestManager& httpManager, LGFX& tftGfx)
-        : configServer(config), authHandler(auth), http(httpManager), tft(tftGfx)
+    : configServer(config), authHandler(auth), http(httpManager), tft(tftGfx)
     {
     }
     ~AircraftManager() = default;
-
+    
+    void ForcedFetchCycle(); 
     void Initialise();
     void Update();
     void Draw(LGFX_Sprite& backbuffer);

@@ -47,9 +47,9 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                     <input
                         name="radius"
                         type="number"
-                        min="0.000001"
-                        step="0.000001"
-                        max="2.499999"
+                        min="0.00"
+                        step="0.01"
+                        max="2.50"
                         value='%RADIUS%'
                         class="flex-1 border border-green-500 bg-gray-900 w-full px-3 py-2 text-lg sm:text-base sm:px-1 sm:py-0">
                 </label>
@@ -108,7 +108,72 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             </form>
         </fieldset>
 
+        <fieldset class="border border-green-500 p-5 w-full max-w-2xl mx-auto sm:m-10 mt-4">
+            <legend class="px-2">Quick Radius Update</legend>
+
+            <form id="radiusCfg" action="/save-radius" method="POST" class="flex flex-col gap-4 sm:gap-2 sm:flex-row sm:items-center">
+                <label class="flex flex-col sm:flex-row items-start sm:items-center gap-2">
+                    <span>Radius (in &deg;):</span>
+                    <input
+                        id="radiusValue"
+                        name="radius"
+                        type="number"
+                        min="0.00"
+                        step="0.01"
+                        max="2.50"
+                        value='%RADIUS%'
+                        class="border border-green-500 bg-gray-900 px-3 py-2 text-lg sm:text-base sm:px-1 sm:py-0 w-24">
+                </label>
+
+                <div class="flex gap-2">
+                    <button
+                        type="button"
+                        onclick='adjustRadius(-0.05)'
+                        class="bg-green-500 text-black px-3 py-2 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer font-bold">-</button>
+                    <button
+                        type="button"
+                        onclick='adjustRadius(0.05)'
+                        class="bg-green-500 text-black px-3 py-2 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer font-bold">+</button>
+                </div>
+
+                <div id="radiusResult" class="px-1 sm:px-2"></div>
+            </form>
+        </fieldset>
+
         <script>
+            let radiusSubmissionTimeout = null;
+            const RADIUS_SUBMISSION_HYSTERESIS_MS = 300;
+            
+            function submitRadius() {
+                const form = document.getElementById('radiusCfg');
+                const formData = new FormData(form);
+                fetch(form.action, { method: 'POST', body: formData })
+                    .then(r => r.text())
+                    .then(html => document.getElementById('radiusResult').innerHTML = html);
+            }
+            
+            function adjustRadius(delta) {
+                const radiusInput = document.getElementById('radiusValue');
+                let currentValue = parseFloat(radiusInput.value);
+                let newValue = currentValue + delta;
+                
+                // Clamp to min/max values
+                newValue = Math.max(0.00, Math.min(2.50, newValue));
+                
+                radiusInput.value = newValue.toFixed(2);
+                
+                // Clear any pending submission
+                if (radiusSubmissionTimeout !== null) {
+                    clearTimeout(radiusSubmissionTimeout);
+                }
+                
+                // Schedule submission after hysteresis period
+                radiusSubmissionTimeout = setTimeout(() => {
+                    submitRadius();
+                    radiusSubmissionTimeout = null;
+                }, RADIUS_SUBMISSION_HYSTERESIS_MS);
+            }
+
             document.getElementById('cfg').addEventListener('submit', function(e) {
                 e.preventDefault();
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
@@ -157,14 +222,17 @@ void ConfigurationWebServer::Initialise() {
         std::fill(openskySecret.begin(), openskySecret.end(), '*');
 
         // template processor called once per %PLACEHOLDER% token found in CONFIG_HTML.
+        // Format radius to 2 decimal places
+        char radiusFormatted[8];
+        snprintf(radiusFormatted, sizeof(radiusFormatted), "%.2f", radius.toFloat());
         AsyncWebServerResponse* response = request->beginResponse(
             200, "text/html",
             (const uint8_t*)CONFIG_HTML, sizeof(CONFIG_HTML) - 1,
-            [latitude, longitude, radius, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled]
+            [latitude, longitude, radiusFormatted, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled]
             (const String& var) -> String {
                 if (var == "LATITUDE")       return latitude;
                 if (var == "LONGITUDE")      return longitude;
-                if (var == "RADIUS")         return radius;
+                if (var == "RADIUS")         return String(radiusFormatted);
                 if (var == "OPENSKY_ID")     return openskyClientId;
                 if (var == "OPENSKY_SECRET") return openskySecret;
                 if (var == "SCANLINE")       return scanlineEnabled == "true" ? "checked" : "";
@@ -217,6 +285,25 @@ void ConfigurationWebServer::Initialise() {
 
         request->send(200, "text/html", "Saved - restarting device...");
         ESP.restart();
+        }
+    );
+
+    // Handle quick radius update (no restart)
+    server.on("/save-radius", HTTP_POST, [&](AsyncWebServerRequest* request) {
+        Serial.println("[POST] Handling quick radius update...");
+
+        const auto* param = request->getParam("radius", true);
+        if (param != nullptr) {
+            if (prefsMutex == nullptr || xSemaphoreTake(prefsMutex, portMAX_DELAY) == pdTRUE) {
+                prefs.begin("config", false);
+                prefs.putString("radius", param->value());
+                prefs.end();
+                if (prefsMutex != nullptr) xSemaphoreGive(prefsMutex);
+            }
+            request->send(200, "text/html", "Radius updated successfully!");
+        } else {
+            request->send(400, "text/html", "Error: radius parameter missing");
+        }
         }
     );
 
