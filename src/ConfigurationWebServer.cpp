@@ -120,7 +120,7 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         name="radius"
                         type="number"
                         min="0.00"
-                        step="0.01"
+                        step="0.005"
                         max="2.50"
                         value='%RADIUS%'
                         class="border border-green-500 bg-gray-900 px-3 py-2 text-lg sm:text-base sm:px-1 sm:py-0 w-24">
@@ -129,11 +129,11 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 <div class="flex gap-2">
                     <button
                         type="button"
-                        onclick='adjustRadius(-0.05)'
+                        onclick='adjustRadius(-1)'
                         class="bg-green-500 text-black px-3 py-2 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer font-bold">-</button>
                     <button
                         type="button"
-                        onclick='adjustRadius(0.05)'
+                        onclick='adjustRadius(1)'
                         class="bg-green-500 text-black px-3 py-2 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer font-bold">+</button>
                 </div>
 
@@ -205,6 +205,14 @@ static const char CONFIG_HTML[] PROGMEM = R"(
         </fieldset>
 
         <script>
+            function updateRadiusStep() {
+                const radiusInput = document.getElementById('radiusValue');
+                if (!radiusInput) return;
+                
+                const value = parseFloat(radiusInput.value);
+                radiusInput.step = value < 0.1 ? '0.005' : '0.01';
+            }
+            
             const radiusDebounce = {
                 timeoutId: null,
                 HYSTERESIS_MS: 300,
@@ -222,18 +230,20 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                         });
                 },
                 
-                adjust: function(delta) {
+                adjust: function(direction) {
                     const radiusInput = document.getElementById('radiusValue');
                     if (!radiusInput) return;
                     
                     let currentValue = parseFloat(radiusInput.value);
-                    let newValue = currentValue + delta;
+                    let step = currentValue < 0.1 ? 0.005 : 0.01;
+                    let newValue = currentValue + (step * direction);
                     
                     // Clamp to min/max values
                     newValue = Math.max(0.00, Math.min(2.50, newValue));
-                    radiusInput.value = newValue.toFixed(2);
+                    radiusInput.value = newValue.toFixed(3);
                     
-                    console.log('[radius] Adjust click, new value:', newValue.toFixed(2), 'timeout pending:', this.timeoutId !== null);
+                    updateRadiusStep();
+                    console.log('[radius] Adjust click, new value:', newValue.toFixed(3), 'step:', step, 'timeout pending:', this.timeoutId !== null);
                     
                     // Clear any pending submission
                     if (this.timeoutId !== null) {
@@ -252,8 +262,8 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 }
             };
             
-            function adjustRadius(delta) {
-                radiusDebounce.adjust(delta);
+            function adjustRadius(direction) {
+                radiusDebounce.adjust(direction);
             }
 
             const positionDebounce = {
@@ -336,6 +346,15 @@ static const char CONFIG_HTML[] PROGMEM = R"(
                 fetch(this.action, { method: 'POST', body: new FormData(this) })
                     .then(r => r.text())
                     .then(html => document.getElementById('result').innerHTML = html);
+            });
+            
+            // Set up radius input to update step dynamically
+            document.addEventListener('DOMContentLoaded', function() {
+                const radiusInput = document.getElementById('radiusValue');
+                if (radiusInput) {
+                    updateRadiusStep();
+                    radiusInput.addEventListener('input', updateRadiusStep);
+                }
             });
         </script>
     </body>

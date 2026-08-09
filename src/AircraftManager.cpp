@@ -119,11 +119,29 @@ void AircraftManager::FetchCycle()
 
         // track
         JsonDocument doc;
-        log_d("Aircraft JSON: %s", result.response.c_str());
+        // log_d("Aircraft JSON: %s", result.response.c_str());
         // log response size for debugging
         log_i("Aircraft JSON size: %d bytes", result.response.length());
 
         deserializeJson(doc, result.response);
+        JsonArray states = doc["states"];
+        
+        // Create a vector of indices and sort them by distance instead of sorting the JsonArray directly
+        // (JsonArrayIterator doesn't support random-access operations required by std::sort)
+        std::vector<int> sortedIndices;
+        for (int i = 0; i < states.size(); i++) {
+            sortedIndices.push_back(i);
+        }
+        
+        std::sort(sortedIndices.begin(), sortedIndices.end(), [&](int idxA, int idxB) {
+            float latA = states[idxA][6].as<float>();
+            float lonA = states[idxA][5].as<float>();
+            float latB = states[idxB][6].as<float>();
+            float lonB = states[idxB][5].as<float>();
+            float distA = sqrt(pow(latA - lat, 2) + pow(lonA - lon, 2));
+            float distB = sqrt(pow(latB - lat, 2) + pow(lonB - lon, 2));
+            return distA < distB;
+        });
         
         // log aircraft json data
         
@@ -136,9 +154,9 @@ void AircraftManager::FetchCycle()
             
             // Parse and insert aircraft directly without temporary vector to avoid heap exhaustion.
             // Stop parsing once we reach MAX_TRACKED_AIRCRAFT to conserve memory.
-            JsonArray states = doc["states"];
             int parseCount = 0;
-            for (JsonVariant state : states) {
+            for (int idx : sortedIndices) {
+                JsonVariant state = states[idx];
                 // For new aircraft, check if we're at capacity before parsing
                 const char* icao = state[0].as<const char*>();
                 bool isExisting = false;
@@ -211,12 +229,7 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
     lat = configServer.GetStoredString("tmpLat").toDouble();
     lon = configServer.GetStoredString("tmpLon").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
-    if (rad < 0.1) rad = 0.1; // enforce minimum radius of 0.2 degrees (~22km)
-    // if (newRad != rad) {
-    //     rad = newRad;
-    //     ForcedFetchCycle(); // force a fetch cycle to update the aircraft positions based on the new radius
-    //     return;
-    // }
+    if (rad < 0.01) rad = 0.01; // enforce minimum radius of 0.01 degrees (~1km)
 
     if (now - lastAlternateToggle >= 5000) {
         alternate = !alternate;
