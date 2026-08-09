@@ -208,7 +208,10 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
     static boolean alternate = false;
     static unsigned long lastAlternateToggle = 0;
     unsigned long now = millis();
+    lat = configServer.GetStoredString("latitude").toDouble();
+    lon = configServer.GetStoredString("longitude").toDouble();
     rad = configServer.GetStoredString("radius").toDouble();
+    if (rad < 0.1) rad = 0.1; // enforce minimum radius of 0.2 degrees (~22km)
     // if (newRad != rad) {
     //     rad = newRad;
     //     ForcedFetchCycle(); // force a fetch cycle to update the aircraft positions based on the new radius
