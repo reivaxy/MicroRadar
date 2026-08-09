@@ -7,7 +7,7 @@
 #include "JsonParser.h"
 
 // Maps to OpenSky /states/all response
-// Field indices match the documented state vector array order
+// Only fields actually used for rendering are kept
 struct Aircraft {
     String icao24;          // [0]  unique ICAO 24-bit transponder address
     String callsign;        // [1]  flight callsign (8 chars), may be null
@@ -20,13 +20,6 @@ struct Aircraft {
     bool   onGround;        // [8]  true if surface position report
     float  velocity;        // [9]  ground speed in m/s
     float  trueTrack;       // [10] heading in degrees clockwise from north
-    float  verticalRate;    // [11] climb/descent rate in m/s (positive = climbing)
-    // [12] sensors — null unless filtered by sensor, skipped
-    float  geoAltitude;     // [13] geometric altitude in metres
-    String squawk;          // [14] transponder squawk code
-    bool   spi;             // [15] special purpose indicator flag
-    int    positionSource;  // [16] 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
-    int    category;        // [17] aircraft category (0=unknown, see docs for full list)
 };
 
 namespace JsonParser {

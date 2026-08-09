@@ -1,11 +1,12 @@
 #include "AircraftManager.h"
 
+#include <algorithm>
+#include <ArduinoJson.h>
+
 constexpr int SCREEN_SIZE = 240;
 constexpr int SCREEN_SIZE_DIV_2 = (SCREEN_SIZE / 2);
 
-#define MAX_TRACKED_AIRCRAFT 40
-
-#include <ArduinoJson.h>
+#define MAX_TRACKED_AIRCRAFT 30
 
 void AircraftManager::Initialise()
 {
@@ -35,7 +36,7 @@ void AircraftManager::Initialise()
     fetchInterval = MS_PER_DAY / dailyRequestBudget;
     if (fetchInterval < 30000) fetchInterval = 30000; // Enforce minimum 30 seconds
     // display the fetch interval in seconds for debugging
-    log_i("[INFO] Fetch interval: %d seconds", fetchInterval / 1000);
+    log_i("Fetch interval: %d seconds", fetchInterval / 1000);
 
     // Move the blocking OpenSky HTTP/token calls off the render thread and
     // onto a dedicated FreeRTOS task pinned to core 0 (Arduino's loop() runs
@@ -51,6 +52,11 @@ void AircraftManager::Initialise()
         &fetchTaskHandle,
         0       // core 0
     );
+
+    // display free memory for debugging
+    log_i("Initial Free heap: %d bytes", ESP.getFreeHeap());
+    // Display free max heap block size for debugging
+    log_i("Initial Max alloc heap: %d bytes", ESP.getMaxAllocHeap());
 }
 
 void AircraftManager::FetchTaskTrampoline(void* param)
@@ -81,7 +87,7 @@ void AircraftManager::FetchCycle()
 
     // fetch cycle
     if (now - lastFetch >= fetchInterval) {
-        log_i("[INFO] Fetching aircraft data from OpenSky API...");
+        log_i("Fetching aircraft data from OpenSky API...");
         lastFetch = now;
         // auth
         const String token = authHandler.GetValidToken(
@@ -113,15 +119,11 @@ void AircraftManager::FetchCycle()
 
         // track
         JsonDocument doc;
-        log_d("[INFO] Aircraft JSON: %s", result.response.c_str());
+        log_d("Aircraft JSON: %s", result.response.c_str());
         // log response size for debugging
-        log_i("[INFO] Aircraft JSON size: %d bytes", result.response.length());
+        log_i("Aircraft JSON size: %d bytes", result.response.length());
 
         deserializeJson(doc, result.response);
-        auto aircraft = JsonParser::ParseArray<Aircraft>(doc["states"]);
-        
-        // Clear the JsonDocument to free parsing memory since we've extracted all needed data
-        doc.clear();
         
         // log aircraft json data
         
@@ -132,36 +134,63 @@ void AircraftManager::FetchCycle()
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
             constexpr int STALE_TIMEOUT_MS = 30000;   // Remove aircraft not seen for 30 seconds
             
-            for (auto& ac : aircraft) {
-                auto it = trackedAircraft.find(ac.icao24);
-                if (it == trackedAircraft.end()) {
-                    // Only add new aircraft if we haven't hit the limit
-                    if (trackedAircraft.size() < MAX_TRACKED_AIRCRAFT) {
-                        trackedAircraft.emplace(ac.icao24, TrackedAircraft{ ac, now });
+            // Parse and insert aircraft directly without temporary vector to avoid heap exhaustion.
+            // Stop parsing once we reach MAX_TRACKED_AIRCRAFT to conserve memory.
+            JsonArray states = doc["states"];
+            int parseCount = 0;
+            for (JsonVariant state : states) {
+                // For new aircraft, check if we're at capacity before parsing
+                const char* icao = state[0].as<const char*>();
+                bool isExisting = false;
+                for (auto& tracked : trackedAircraft) {
+                    if (tracked.state.icao24 == icao) {
+                        isExisting = true;
+                        break;
                     }
+                }
+                
+                // Skip new aircraft if we're at capacity
+                if (!isExisting && trackedAircraft.size() >= MAX_TRACKED_AIRCRAFT) {
+                    continue;
+                }
+                
+                Aircraft ac = JsonParser::Parse<Aircraft>(state);
+                
+                // Find existing aircraft
+                auto it = std::find_if(trackedAircraft.begin(), trackedAircraft.end(),
+                    [&](const TrackedAircraft& ta) { return ta.state.icao24 == ac.icao24; });
+                
+                if (it == trackedAircraft.end()) {
+                    // New aircraft - add it
+                    trackedAircraft.push_back(TrackedAircraft{ ac, now });
                 } else {
-                    it->second.Update(ac, now);
+                    // Existing aircraft - update it
+                    it->Update(ac, now);
+                }
+                
+                if (++parseCount > 50) break;  // Safety: never parse more than 50 in one cycle
+            }
+
+            // Remove stale aircraft (not updated in STALE_TIMEOUT_MS)
+            for (auto it = trackedAircraft.begin(); it != trackedAircraft.end(); ) {
+                if ((now - it->lastSeen) > STALE_TIMEOUT_MS) {
+                    it = trackedAircraft.erase(it);
+                } else {
+                    ++it;
                 }
             }
 
-            // remove any planes that disappeared from the feed or are stale
-            for (auto it = trackedAircraft.begin(); it != trackedAircraft.end(); ) {
-                bool aircraftPresent = std::any_of(aircraft.begin(), aircraft.end(), [&](const Aircraft& ac) { return ac.icao24 == it->first; });
-                bool isStale = (now - it->second.lastSeen) > STALE_TIMEOUT_MS;
-                
-                if (!aircraftPresent || isStale)
-                    it = trackedAircraft.erase(it);
-                else
-                    ++it;
-            }
-
             // Log how many planes were displayed for debugging purposes
-            log_i("[INFO] Stored %d aircraft", trackedAircraft.size());
+            log_i("Stored %d aircraft", trackedAircraft.size());
+            // display free memory for debugging
+            log_i("Free heap: %d bytes", ESP.getFreeHeap());
+            // Display free max heap block size for debugging
+            log_i("Max alloc heap: %d bytes", ESP.getMaxAllocHeap());
             xSemaphoreGive(dataMutex);
         }
-
-        // Deallocate the temporary aircraft vector immediately to prevent heap fragmentation
-        std::vector<Aircraft>().swap(aircraft);
+        
+        // Clear the JsonDocument to free parsing memory
+        doc.clear();
     }
 }
 
@@ -202,7 +231,7 @@ void AircraftManager::Draw(LGFX_Sprite& backbuffer)
             backbuffer.setTextDatum(lgfx::middle_center);
             backbuffer.drawString("MAX", SCREEN_SIZE_DIV_2, 10 + 3*backbuffer.fontHeight() + 2);
         }
-        for (auto& [icao, tracked] : trackedAircraft) {
+        for (auto& tracked : trackedAircraft) {
             if (tracked.state.onGround) continue;
 
             tracked.Tick();

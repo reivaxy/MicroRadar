@@ -1,6 +1,6 @@
 #pragma once
 
-#include <map>
+#include <vector>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -18,7 +18,7 @@ private:
     double lon = 0.0;
     double rad = 0.2;
     double initRad = rad;
-    std::map<String, TrackedAircraft> trackedAircraft;
+    std::vector<TrackedAircraft> trackedAircraft;
 
     bool displayInfoText = true;
     bool displayTriangles = true;

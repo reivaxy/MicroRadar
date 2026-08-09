@@ -141,37 +141,55 @@ static const char CONFIG_HTML[] PROGMEM = R"(
         </fieldset>
 
         <script>
-            let radiusSubmissionTimeout = null;
-            const RADIUS_SUBMISSION_HYSTERESIS_MS = 300;
-            
-            function submitRadius() {
-                const form = document.getElementById('radiusCfg');
-                const formData = new FormData(form);
-                fetch(form.action, { method: 'POST', body: formData })
-                    .then(r => r.text())
-                    .then(html => document.getElementById('radiusResult').innerHTML = html);
-            }
+            const radiusDebounce = {
+                timeoutId: null,
+                HYSTERESIS_MS: 300,
+                
+                submit: function() {
+                    const form = document.getElementById('radiusCfg');
+                    if (!form) return;
+                    const formData = new FormData(form);
+                    console.log('[radius] Submitting radius value:', formData.get('radius'));
+                    fetch(form.action, { method: 'POST', body: formData })
+                        .then(r => r.text())
+                        .then(html => {
+                            const resultDiv = document.getElementById('radiusResult');
+                            if (resultDiv) resultDiv.innerHTML = html;
+                        });
+                },
+                
+                adjust: function(delta) {
+                    const radiusInput = document.getElementById('radiusValue');
+                    if (!radiusInput) return;
+                    
+                    let currentValue = parseFloat(radiusInput.value);
+                    let newValue = currentValue + delta;
+                    
+                    // Clamp to min/max values
+                    newValue = Math.max(0.00, Math.min(2.50, newValue));
+                    radiusInput.value = newValue.toFixed(2);
+                    
+                    console.log('[radius] Adjust click, new value:', newValue.toFixed(2), 'timeout pending:', this.timeoutId !== null);
+                    
+                    // Clear any pending submission
+                    if (this.timeoutId !== null) {
+                        clearTimeout(this.timeoutId);
+                        this.timeoutId = null;
+                        console.log('[radius] Cleared previous timeout');
+                    }
+                    
+                    // Schedule submission after hysteresis period
+                    const self = this;
+                    this.timeoutId = setTimeout(() => {
+                        console.log('[radius] Timeout fired, submitting');
+                        self.submit();
+                        self.timeoutId = null;
+                    }, this.HYSTERESIS_MS);
+                }
+            };
             
             function adjustRadius(delta) {
-                const radiusInput = document.getElementById('radiusValue');
-                let currentValue = parseFloat(radiusInput.value);
-                let newValue = currentValue + delta;
-                
-                // Clamp to min/max values
-                newValue = Math.max(0.00, Math.min(2.50, newValue));
-                
-                radiusInput.value = newValue.toFixed(2);
-                
-                // Clear any pending submission
-                if (radiusSubmissionTimeout !== null) {
-                    clearTimeout(radiusSubmissionTimeout);
-                }
-                
-                // Schedule submission after hysteresis period
-                radiusSubmissionTimeout = setTimeout(() => {
-                    submitRadius();
-                    radiusSubmissionTimeout = null;
-                }, RADIUS_SUBMISSION_HYSTERESIS_MS);
+                radiusDebounce.adjust(delta);
             }
 
             document.getElementById('cfg').addEventListener('submit', function(e) {
@@ -290,7 +308,7 @@ void ConfigurationWebServer::Initialise() {
 
     // Handle quick radius update (no restart)
     server.on("/save-radius", HTTP_POST, [&](AsyncWebServerRequest* request) {
-        Serial.println("[POST] Handling quick radius update...");
+        log_i("[POST] Handling quick radius update...");
 
         const auto* param = request->getParam("radius", true);
         if (param != nullptr) {
