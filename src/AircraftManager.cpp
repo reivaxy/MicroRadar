@@ -362,7 +362,7 @@ void AircraftManager::DrawAircraftInfo(LGFX_Sprite& backbuffer, int x, int y, co
         backbuffer.drawString(String(static_cast<int>(tracked.state.velocity * 3.6f)) + "km/h", x + 5, y + 5 + lineHeight);
     } else {
         backbuffer.drawString(tracked.state.originCountry, x + 5, y + 5);
-        backbuffer.drawString(String(tracked.state.baroAltitude) + "m", x + 5, y + 5 + lineHeight);
+        backbuffer.drawString(String(static_cast<int>(tracked.state.baroAltitude)) + "m", x + 5, y + 5 + lineHeight);
     }
 }
 
