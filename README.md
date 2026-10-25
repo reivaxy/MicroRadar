@@ -2,6 +2,9 @@
 
 An ESP32-based aircraft radar display system that tracks aircraft in real-time using the OpenSky Network API and displays them on a 240×240 LCD screen.
 
+<img width="1862" height="1833" alt="20261025_102111" src="https://github.com/user-attachments/assets/a6580a4a-8449-482a-a93a-318d4a059f7c" />
+
+
 ## Features
 
 ### Core Functionality
@@ -23,6 +26,9 @@ An ESP32-based aircraft radar display system that tracks aircraft in real-time u
 - **Persistent Storage**: Settings saved to ESP32 flash memory (NVS)
 - **WiFi Manager**: Built-in WiFi setup hotspot if credentials not preconfigured
 - **Optional Hardcoded WiFi**: Support for pre-baked SSID and password
+ 
+<img width="744" height="702" alt="image" src="https://github.com/user-attachments/assets/d46ea2db-fb15-4faa-84c1-8d7a1518c6ba" />
+
 
 ### Configuration Parameters
 - **Latitude** (`latitude`): Center latitude for radar display
