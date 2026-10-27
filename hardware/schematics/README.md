@@ -1,7 +1,8 @@
 # Schematics
 
-[!CAUTION]
-Work In Progress
+> [!CAUTION]
+> 
+> Work In Progress
 
 This folder will ultimately contain the full schematics with zoom in/out and directional shift buttons once they are handled by the firmware.
 
