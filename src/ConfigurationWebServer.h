@@ -5,6 +5,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+// Global OTA status - extern declaration so other files can check if OTA is in progress
+extern volatile bool g_otaInProgress;
+
 class ConfigurationWebServer {
 private:
     AsyncWebServer server;

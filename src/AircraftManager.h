@@ -59,4 +59,6 @@ private:
     void Initialise();
     void Update();
     void Draw(LGFX_Sprite& backbuffer);
+    void SuspendFetchTask();
+    void ResumeFetchTask();
 };

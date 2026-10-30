@@ -1,5 +1,16 @@
 #include "ConfigurationWebServer.h"
+#include "AircraftManager.h"
 #include <ESPmDNS.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
+
+// Forward declaration
+class AircraftManager;
+extern AircraftManager aircraftManager;
+
+// Global OTA status tracking
+static String g_otaErrorMsg = "";
+volatile bool g_otaInProgress = false;
 
 // HTML stored in flash
 // %PLACEHOLDER% tokens are substituted at serve time by the template processor
@@ -10,6 +21,246 @@ static const char CONFIG_HTML[] PROGMEM = R"(
         <title>Configure Micro Radar</title>
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.0"></script>
         <meta charset="UTF-8">
+        <script>
+            function updateRadiusStep() {
+                const radiusInput = document.getElementById('radiusValue');
+                if (!radiusInput) return;
+                
+                const value = parseFloat(radiusInput.value);
+                radiusInput.step = value < 0.1 ? '0.005' : '0.01';
+            }
+            
+            const radiusDebounce = {
+                timeoutId: null,
+                HYSTERESIS_MS: 300,
+                
+                submit: function() {
+                    const form = document.getElementById('radiusCfg');
+                    if (!form) return;
+                    const formData = new FormData(form);
+                    console.log('[radius] Submitting radius value:', formData.get('radius'));
+                    fetch(form.action, { method: 'POST', body: formData })
+                        .then(r => r.text())
+                        .then(html => {
+                            const resultDiv = document.getElementById('radiusResult');
+                            if (resultDiv) resultDiv.innerHTML = html;
+                        });
+                },
+                
+                adjust: function(direction) {
+                    const radiusInput = document.getElementById('radiusValue');
+                    if (!radiusInput) return;
+                    
+                    let currentValue = parseFloat(radiusInput.value);
+                    let step = currentValue < 0.1 ? 0.005 : 0.01;
+                    let newValue = currentValue + (step * direction);
+                    
+                    // Clamp to min/max values
+                    newValue = Math.max(0.00, Math.min(2.50, newValue));
+                    radiusInput.value = newValue.toFixed(3);
+                    
+                    updateRadiusStep();
+                    console.log('[radius] Adjust click, new value:', newValue.toFixed(3), 'step:', step, 'timeout pending:', this.timeoutId !== null);
+                    
+                    // Clear any pending submission
+                    if (this.timeoutId !== null) {
+                        clearTimeout(this.timeoutId);
+                        this.timeoutId = null;
+                        console.log('[radius] Cleared previous timeout');
+                    }
+                    
+                    // Schedule submission after hysteresis period
+                    const self = this;
+                    this.timeoutId = setTimeout(() => {
+                        console.log('[radius] Timeout fired, submitting');
+                        self.submit();
+                        self.timeoutId = null;
+                    }, this.HYSTERESIS_MS);
+                }
+            };
+            
+            function adjustRadius(direction) {
+                radiusDebounce.adjust(direction);
+            }
+
+            const positionDebounce = {
+                timeoutId: null,
+                HYSTERESIS_MS: 300,
+                
+                submit: function() {
+                    const latInput = document.getElementById('latitudeValue');
+                    const lonInput = document.getElementById('longitudeValue');
+                    if (!latInput || !lonInput) return;
+                    
+                    const formData = new FormData();
+                    formData.append('latitude', latInput.value);
+                    formData.append('longitude', lonInput.value);
+                    
+                    console.log('[position] Submitting position:', latInput.value, lonInput.value);
+                    fetch('/save-position', { method: 'POST', body: formData })
+                        .then(r => r.text())
+                        .then(html => {
+                            const resultDiv = document.getElementById('positionResult');
+                            if (resultDiv) resultDiv.innerHTML = html;
+                        });
+                },
+                
+                adjust: function(field, direction) {
+                    const input = document.getElementById(field + 'Value');
+                    const radiusInput = document.getElementById('radiusValue');
+                    if (!input || !radiusInput) return;
+                    
+                    const radius = parseFloat(radiusInput.value);
+                    const offset = radius / 4; // Offset is 1/4 of the radius
+                    let currentValue = parseFloat(input.value);
+                    let newValue = currentValue + (offset * direction);
+                    
+                    // Clamp latitude to [-90, 90] and longitude to [-180, 180]
+                    if (field === 'latitude') {
+                        newValue = Math.max(-90, Math.min(90, newValue));
+                    } else if (field === 'longitude') {
+                        newValue = Math.max(-180, Math.min(180, newValue));
+                    }
+                    
+                    input.value = newValue.toFixed(6);
+                    
+                    console.log('[position] Adjust', field, 'by', offset.toFixed(6), 'new value:', newValue.toFixed(6));
+                    
+                    // Clear any pending submission
+                    if (this.timeoutId !== null) {
+                        clearTimeout(this.timeoutId);
+                        this.timeoutId = null;
+                    }
+                    
+                    // Schedule submission after hysteresis period
+                    const self = this;
+                    this.timeoutId = setTimeout(() => {
+                        console.log('[position] Timeout fired, submitting');
+                        self.submit();
+                        self.timeoutId = null;
+                    }, this.HYSTERESIS_MS);
+                }
+            };
+            
+            function adjustPosition(field, direction) {
+                positionDebounce.adjust(field, direction);
+            }
+
+            function resetLocation() {
+                console.log('[position] Resetting location to saved values');
+                fetch('/reset-position', { method: 'POST' })
+                    .then(r => r.text())
+                    .then(html => {
+                        const resultDiv = document.getElementById('positionResult');
+                        if (resultDiv) resultDiv.innerHTML = html;
+                        // Reload the page to refresh the position values
+                        setTimeout(() => location.reload(), 500);
+                    });
+            }
+
+            // OTA Update Handler - must be global for onclick to work
+            window.startOTAUpdate = function() {
+                const fileInput = document.getElementById('firmwareFile');
+                const resultDiv = document.getElementById('otaResult');
+                const statusDiv = document.getElementById('otaStatus');
+                const statusText = document.getElementById('otaStatusText');
+                const progressDiv = document.getElementById('otaProgress');
+                const uploadBtn = document.getElementById('otaUploadBtn');
+
+                // Null check all elements before using them
+                if (!fileInput || !resultDiv || !statusDiv || !statusText || !progressDiv || !uploadBtn) {
+                    console.error('[OTA] Missing required DOM elements:', {
+                        fileInput: !!fileInput, resultDiv: !!resultDiv, statusDiv: !!statusDiv,
+                        statusText: !!statusText, progressDiv: !!progressDiv, uploadBtn: !!uploadBtn
+                    });
+                    alert('Error: OTA form elements not found. Please refresh the page.');
+                    return;
+                }
+
+                const file = fileInput.files[0];
+
+                if (!file) {
+                    resultDiv.innerHTML = '<span class="text-red-500">Please select a file</span>';
+                    return;
+                }
+
+                if (!file.name.endsWith('.bin')) {
+                    resultDiv.innerHTML = '<span class="text-red-500">File must be a .bin file</span>';
+                    return;
+                }
+
+                resultDiv.innerHTML = '';
+                statusText.textContent = 'Uploading firmware...';
+                statusDiv.style.display = 'block';
+                progressDiv.style.display = 'flex';
+                uploadBtn.disabled = true;
+                fileInput.disabled = true;
+
+                const xhr = new XMLHttpRequest();
+                const formData = new FormData();
+                formData.append('firmware', file);
+
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percentComplete = (e.loaded / e.total) * 100;
+                        const progressBar = document.getElementById('otaProgressBar');
+                        const progressText = document.getElementById('otaProgressText');
+                        // NOTE: never write a raw percent sign in this page, the server's
+                        // template processor would treat it as a placeholder delimiter.
+                        // Use \x25 in JS and &#37; in HTML.
+                        if (progressBar) progressBar.style.width = percentComplete + '\x25';
+                        if (progressText) progressText.textContent = Math.round(percentComplete) + '\x25';
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    // Ensure progress shows completion
+                    const progressBar = document.getElementById('otaProgressBar');
+                    const progressText = document.getElementById('otaProgressText');
+                    if (progressBar) progressBar.style.width = '100\x25';
+                    if (progressText) progressText.textContent = '100\x25';
+                    
+                    if (xhr.status === 200) {
+                        resultDiv.innerHTML = '<span class="text-green-500 font-bold">Upload successful! Device is updating and will restart...</span>';
+                        if (statusDiv) statusDiv.style.display = 'none';
+                        if (progressDiv) progressDiv.style.display = 'none';
+                    } else {
+                        resultDiv.innerHTML = '<span class="text-red-500">Error: Upload failed (HTTP ' + xhr.status + ')</span>';
+                        if (statusDiv) statusDiv.style.display = 'none';
+                        if (progressDiv) progressDiv.style.display = 'none';
+                        if (uploadBtn) uploadBtn.disabled = false;
+                    }
+                });
+
+                xhr.addEventListener('error', () => {
+                    resultDiv.innerHTML = '<span class="text-red-500">Connection error during upload</span>';
+                    if (statusDiv) statusDiv.style.display = 'none';
+                    if (progressDiv) progressDiv.style.display = 'none';
+                    if (uploadBtn) uploadBtn.disabled = false;
+                });
+
+                xhr.open('POST', '/ota-update');
+                xhr.send(formData);
+            };
+
+            document.addEventListener('DOMContentLoaded', function() {
+                const cfg = document.getElementById('cfg');
+                if (cfg) {
+                    cfg.addEventListener('submit', function(e) {
+                        e.preventDefault();
+                        fetch(this.action, { method: 'POST', body: new FormData(this) })
+                            .then(r => r.text())
+                            .then(html => document.getElementById('result').innerHTML = html);
+                    });
+                }
+                
+                const radiusInput = document.getElementById('radiusValue');
+                if (radiusInput) {
+                    updateRadiusStep();
+                    radiusInput.addEventListener('input', updateRadiusStep);
+                }
+            });
+        </script>
     </head>
     <body class="font-mono bg-gray-900 text-green-500 min-h-screen p-4 sm:p-0 text-md sm:text-sm">
         <fieldset class="border border-green-500 p-5 w-full max-w-2xl mx-auto sm:m-10">
@@ -204,159 +455,42 @@ static const char CONFIG_HTML[] PROGMEM = R"(
             </form>
         </fieldset>
 
-        <script>
-            function updateRadiusStep() {
-                const radiusInput = document.getElementById('radiusValue');
-                if (!radiusInput) return;
-                
-                const value = parseFloat(radiusInput.value);
-                radiusInput.step = value < 0.1 ? '0.005' : '0.01';
-            }
-            
-            const radiusDebounce = {
-                timeoutId: null,
-                HYSTERESIS_MS: 300,
-                
-                submit: function() {
-                    const form = document.getElementById('radiusCfg');
-                    if (!form) return;
-                    const formData = new FormData(form);
-                    console.log('[radius] Submitting radius value:', formData.get('radius'));
-                    fetch(form.action, { method: 'POST', body: formData })
-                        .then(r => r.text())
-                        .then(html => {
-                            const resultDiv = document.getElementById('radiusResult');
-                            if (resultDiv) resultDiv.innerHTML = html;
-                        });
-                },
-                
-                adjust: function(direction) {
-                    const radiusInput = document.getElementById('radiusValue');
-                    if (!radiusInput) return;
-                    
-                    let currentValue = parseFloat(radiusInput.value);
-                    let step = currentValue < 0.1 ? 0.005 : 0.01;
-                    let newValue = currentValue + (step * direction);
-                    
-                    // Clamp to min/max values
-                    newValue = Math.max(0.00, Math.min(2.50, newValue));
-                    radiusInput.value = newValue.toFixed(3);
-                    
-                    updateRadiusStep();
-                    console.log('[radius] Adjust click, new value:', newValue.toFixed(3), 'step:', step, 'timeout pending:', this.timeoutId !== null);
-                    
-                    // Clear any pending submission
-                    if (this.timeoutId !== null) {
-                        clearTimeout(this.timeoutId);
-                        this.timeoutId = null;
-                        console.log('[radius] Cleared previous timeout');
-                    }
-                    
-                    // Schedule submission after hysteresis period
-                    const self = this;
-                    this.timeoutId = setTimeout(() => {
-                        console.log('[radius] Timeout fired, submitting');
-                        self.submit();
-                        self.timeoutId = null;
-                    }, this.HYSTERESIS_MS);
-                }
-            };
-            
-            function adjustRadius(direction) {
-                radiusDebounce.adjust(direction);
-            }
+        <fieldset class="border border-green-500 p-5 w-full max-w-2xl mx-auto sm:m-10 mt-4">
+            <legend class="px-2">Firmware Update (OTA)</legend>
 
-            const positionDebounce = {
-                timeoutId: null,
-                HYSTERESIS_MS: 300,
-                
-                submit: function() {
-                    const latInput = document.getElementById('latitudeValue');
-                    const lonInput = document.getElementById('longitudeValue');
-                    if (!latInput || !lonInput) return;
-                    
-                    const formData = new FormData();
-                    formData.append('latitude', latInput.value);
-                    formData.append('longitude', lonInput.value);
-                    
-                    console.log('[position] Submitting position:', latInput.value, lonInput.value);
-                    fetch('/save-position', { method: 'POST', body: formData })
-                        .then(r => r.text())
-                        .then(html => {
-                            const resultDiv = document.getElementById('positionResult');
-                            if (resultDiv) resultDiv.innerHTML = html;
-                        });
-                },
-                
-                adjust: function(field, direction) {
-                    const input = document.getElementById(field + 'Value');
-                    const radiusInput = document.getElementById('radiusValue');
-                    if (!input || !radiusInput) return;
-                    
-                    const radius = parseFloat(radiusInput.value);
-                    const offset = radius / 4; // Offset is 1/4 of the radius
-                    let currentValue = parseFloat(input.value);
-                    let newValue = currentValue + (offset * direction);
-                    
-                    // Clamp latitude to [-90, 90] and longitude to [-180, 180]
-                    if (field === 'latitude') {
-                        newValue = Math.max(-90, Math.min(90, newValue));
-                    } else if (field === 'longitude') {
-                        newValue = Math.max(-180, Math.min(180, newValue));
-                    }
-                    
-                    input.value = newValue.toFixed(6);
-                    
-                    console.log('[position] Adjust', field, 'by', offset.toFixed(6), 'new value:', newValue.toFixed(6));
-                    
-                    // Clear any pending submission
-                    if (this.timeoutId !== null) {
-                        clearTimeout(this.timeoutId);
-                        this.timeoutId = null;
-                    }
-                    
-                    // Schedule submission after hysteresis period
-                    const self = this;
-                    this.timeoutId = setTimeout(() => {
-                        console.log('[position] Timeout fired, submitting');
-                        self.submit();
-                        self.timeoutId = null;
-                    }, this.HYSTERESIS_MS);
-                }
-            };
-            
-            function adjustPosition(field, direction) {
-                positionDebounce.adjust(field, direction);
-            }
-
-            function resetLocation() {
-                console.log('[position] Resetting location to saved values');
-                fetch('/reset-position', { method: 'POST' })
-                    .then(r => r.text())
-                    .then(html => {
-                        const resultDiv = document.getElementById('positionResult');
-                        if (resultDiv) resultDiv.innerHTML = html;
-                        // Reload the page to refresh the position values
-                        setTimeout(() => location.reload(), 500);
-                    });
-            }
-
-            document.getElementById('cfg').addEventListener('submit', function(e) {
-                e.preventDefault();
-                fetch(this.action, { method: 'POST', body: new FormData(this) })
-                    .then(r => r.text())
-                    .then(html => document.getElementById('result').innerHTML = html);
-            });
-            
-            // Set up radius input to update step dynamically
-            document.addEventListener('DOMContentLoaded', function() {
-                const radiusInput = document.getElementById('radiusValue');
-                if (radiusInput) {
-                    updateRadiusStep();
-                    radiusInput.addEventListener('input', updateRadiusStep);
-                }
-            });
-        </script>
+            <form id="otaCfg" enctype="multipart/form-data" class="flex flex-col gap-4 sm:gap-2">
+                <div class="flex flex-col gap-2">
+                    <label class="flex flex-col items-start gap-2">
+                        <span>Select Firmware File (.bin):</span>
+                        <input
+                            id="firmwareFile"
+                            name="firmware"
+                            type="file"
+                            accept=".bin"
+                            class="border border-green-500 bg-gray-900 px-3 py-2 text-lg sm:text-base w-full">
+                    </label>
+                    <button
+                        id="otaUploadBtn"
+                        type="button"
+                        onclick='startOTAUpdate()'
+                        class="bg-green-500 text-black px-4 py-3 text-lg sm:text-base sm:px-2 sm:py-1 cursor-pointer self-start font-bold">
+                        Upload and Update
+                    </button>
+                </div>
+                <div id="otaProgress" class="flex flex-col gap-2" style="display:none;">
+                    <div class="w-full bg-gray-700 border border-green-500 h-6">
+                        <div id="otaProgressBar" class="bg-green-500 h-full" style="width:0&#37;;"></div>
+                    </div>
+                    <span id="otaProgressText" class="text-sm text-green-400">0&#37;</span>
+                </div>
+                <div id="otaStatus" class="mt-2 px-1" style="display:none;">
+                    <span id="otaStatusText" class="text-yellow-500">Uploading firmware...</span>
+                </div>
+                <div id="otaResult" class="mt-2 px-1"></div>
+            </form>
+        </fieldset>
+    </body>
+</html>
     </body>
 </html>
 )";
@@ -377,6 +511,13 @@ void ConfigurationWebServer::Initialise() {
     // Handle visit to config web server
     server.on("/", HTTP_GET, [&](AsyncWebServerRequest* request) {
         log_i("[GET] Handling request to config web server...");
+        
+        // Reject requests during OTA to avoid interfering with firmware update
+        if (g_otaInProgress) {
+            log_w("[GET] Rejecting request - OTA in progress");
+            request->send(503, "text/plain", "Device is performing OTA update");
+            return;
+        }
 
         // read all values up front so the processor lambda can capture by value
         String latitude, longitude, tmpLat, tmpLon, radius, openskyClientId, openskySecret, scanlineEnabled, infoTextEnabled, triangleEnabled;
@@ -428,6 +569,13 @@ void ConfigurationWebServer::Initialise() {
     // Handle save submission to web server
     server.on("/save", HTTP_POST, [&](AsyncWebServerRequest* request) {
         log_i("[POST] Handling form submission to config web server...");
+        
+        // Reject requests during OTA to avoid interfering with firmware update
+        if (g_otaInProgress) {
+            log_w("[POST /save] Rejecting request - OTA in progress");
+            request->send(503, "text/plain", "Device is performing OTA update");
+            return;
+        }
 
         // safe parameter retrieval helper lambda
         auto TrySaveParam = [request, this](const char* paramName) {
@@ -475,6 +623,12 @@ void ConfigurationWebServer::Initialise() {
 
     // Handle quick radius update (no restart)
     server.on("/save-radius", HTTP_POST, [&](AsyncWebServerRequest* request) {
+        // Reject requests during OTA to avoid interfering with firmware update
+        if (g_otaInProgress) {
+            log_w("[POST /save-radius] Rejecting request - OTA in progress");
+            request->send(503, "text/plain", "Device is performing OTA update");
+            return;
+        }
         log_i("[POST] Handling quick radius update...");
 
         const auto* param = request->getParam("radius", true);
@@ -494,6 +648,12 @@ void ConfigurationWebServer::Initialise() {
 
     // Handle quick position update (no restart)
     server.on("/save-position", HTTP_POST, [&](AsyncWebServerRequest* request) {
+        // Reject requests during OTA to avoid interfering with firmware update
+        if (g_otaInProgress) {
+            log_w("[POST /save-position] Rejecting request - OTA in progress");
+            request->send(503, "text/plain", "Device is performing OTA update");
+            return;
+        }
         log_i("[POST] Handling quick position update...");
 
         const auto* latParam = request->getParam("latitude", true);
@@ -534,6 +694,135 @@ void ConfigurationWebServer::Initialise() {
             request->send(400, "text/html", "Error: could not access preferences");
         }
     }
+    );
+
+    // Handle OTA firmware update
+    server.on("/ota-update", HTTP_POST, 
+        [&](AsyncWebServerRequest* request) {
+            log_i("[OTA] POST completion handler");
+            
+            // Re-enable WiFi after OTA
+            WiFi.mode(WIFI_STA);
+            
+            // Check if there was an error during upload
+            if (!g_otaErrorMsg.isEmpty()) {
+                log_e("[OTA] Error captured: %s", g_otaErrorMsg.c_str());
+                String msg = g_otaErrorMsg;
+                g_otaErrorMsg = "";
+                request->send(400, "text/plain", msg);
+                return;
+            }
+            
+            // Check for Update object errors
+            if (Update.hasError()) {
+                log_e("[OTA] Update error: %s", Update.errorString());
+                request->send(400, "text/plain", "Update failed: " + String(Update.errorString()));
+                return;
+            }
+            
+            // Success case
+            if (Update.isFinished()) {
+                log_i("[OTA] Update successful, restarting device...");
+                request->send(200, "text/plain", "Update successful! Restarting device...");
+                delay(1000);
+                ESP.restart();
+                return;
+            }
+            
+            request->send(400, "text/plain", "Update not completed");
+        },
+        [&](AsyncWebServerRequest* request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
+            if (index == 0) {
+                log_i("[OTA] Starting OTA: %s", filename.c_str());
+                g_otaErrorMsg = "";
+                g_otaInProgress = true;
+                
+                // Suspend the background aircraft fetch task to prevent interference
+                log_i("[OTA] Suspending aircraft fetch task");
+                aircraftManager.SuspendFetchTask();
+                
+                // Check file extension
+                if (!filename.endsWith(".bin")) {
+                    g_otaErrorMsg = "Invalid file type (must be .bin)";
+                    log_e("[OTA] %s", g_otaErrorMsg.c_str());
+                    g_otaInProgress = false;
+                    aircraftManager.ResumeFetchTask();
+                    return;
+                }
+                
+                // Get OTA partition
+                const esp_partition_t *running = esp_ota_get_running_partition();
+                const esp_partition_t *next = esp_ota_get_next_update_partition(running);
+                if (!next) {
+                    g_otaErrorMsg = "No OTA partition available";
+                    log_e("[OTA] %s", g_otaErrorMsg.c_str());
+                    g_otaInProgress = false;
+                    aircraftManager.ResumeFetchTask();
+                    return;
+                }
+                
+                size_t partSize = next->size;
+                log_i("[OTA] OTA partition: 0x%x, size: %u bytes", next->address, partSize);
+                log_i("[OTA] Running partition: 0x%x", running->address);
+                
+                // Begin OTA
+                if (!Update.begin(partSize)) {
+                    g_otaErrorMsg = "Update.begin() failed: ";
+                    g_otaErrorMsg += Update.errorString();
+                    log_e("[OTA] %s", g_otaErrorMsg.c_str());
+                    g_otaInProgress = false;
+                    aircraftManager.ResumeFetchTask();
+                    return;
+                }
+                log_i("[OTA] Update.begin() successful");
+            }
+            
+            // Write data to flash
+            if (len > 0 && g_otaErrorMsg.isEmpty()) {
+                if (!Update.isRunning()) {
+                    g_otaErrorMsg = "Update not running at chunk";
+                    log_e("[OTA] %s", g_otaErrorMsg.c_str());
+                    return;
+                }
+                
+                // Update library handles its own synchronization internally
+                size_t written = Update.write(data, len);
+                
+                if (written != len) {
+                    g_otaErrorMsg = "Write failed: wrote ";
+                    g_otaErrorMsg += written;
+                    g_otaErrorMsg += " of ";
+                    g_otaErrorMsg += len;
+                    g_otaErrorMsg += " bytes";
+                    log_e("[OTA] %s at index %d", g_otaErrorMsg.c_str(), index);
+                    Update.abort();
+                }
+            }
+            
+            // Finalize
+            if (final) {
+                log_i("[OTA] Finalizing update...");
+                if (g_otaErrorMsg.isEmpty()) {
+                    // Update library handles its own synchronization
+                    bool endSuccess = Update.end(true);
+                    
+                    if (!endSuccess) {
+                        g_otaErrorMsg = "Update.end() failed: ";
+                        g_otaErrorMsg += Update.errorString();
+                        log_e("[OTA] %s", g_otaErrorMsg.c_str());
+                    } else {
+                        log_i("[OTA] Update verified and finalized successfully");
+                    }
+                } else {
+                    log_e("[OTA] Aborting due to error: %s", g_otaErrorMsg.c_str());
+                    Update.abort();
+                }
+                g_otaInProgress = false;
+                
+                // Resume fetch task and restore system state
+                aircraftManager.ResumeFetchTask();
+            }
+        }
     );
 
     StartServer();

@@ -81,6 +81,22 @@ void AircraftManager::ForcedFetchCycle()
     FetchCycle();
 }
 
+void AircraftManager::SuspendFetchTask()
+{
+    if (fetchTaskHandle != nullptr) {
+        log_i("Suspending aircraft fetch task...");
+        vTaskSuspend(fetchTaskHandle);
+    }
+}
+
+void AircraftManager::ResumeFetchTask()
+{
+    if (fetchTaskHandle != nullptr) {
+        log_i("Resuming aircraft fetch task...");
+        vTaskResume(fetchTaskHandle);
+    }
+}
+
 void AircraftManager::FetchCycle()
 {
     unsigned long now = millis();

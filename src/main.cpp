@@ -127,7 +127,12 @@ void setup()
 
 void loop()
 {
-  aircraftManager.Update();
+  // Pause aircraft updates during OTA to prevent blocking the async event loop
+  if (!g_otaInProgress) {
+    aircraftManager.Update();
+  } else {
+    log_d("[MAIN] Skipping aircraft update (OTA in progress)");
+  }
 
   // draw cycle
   backbuffer.fillScreen(lgfx::color888(0, 0, 0));
@@ -146,5 +151,8 @@ void loop()
 
   // radar sprite fills the entire round panel - no title/credit overlay
   backbuffer.pushSprite(0, 0);
+  
+  // Yield to let async event loop process OTA chunks
+  delay(1);
 }
 
